@@ -1,0 +1,215 @@
+# Note, the development environment will only spin a min of 1 instance (Not HA Support)
+# The production environment will spin a min of 2 instance (HA support)
+# You can adjust the ASMIN, ASMAX, ASDES at the master.yaml file
+# to meet your instances spin numbers.
+#
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+    This template deploys an AutoScaling Launch Config and Group for WebServer
+
+Parameters: 
+
+  MKServerEnv:
+    Description: "Server Environment name."
+    ConstraintDescription: "Choose an Environment from the drop down"
+    Type: "String"
+    AllowedValues: 
+      - "dev"
+      - "test"
+      - "prod"
+
+  MKKeyName:
+    Description: "Enter an existing EC2 KeyPair. Default is MyEC2Key"
+    Type: "String"
+
+  MKInstanceType: 
+    Description: "Enter t2.micro or m1.small. Default is t2.micro."
+    Type: "String"
+    AllowedValues: 
+      - "t2.micro"
+      - "m1.small"
+      - "m3.medium"
+      - "m3.large"
+      - "m3.xlarge"
+      - "m3.2xlarge"
+
+  MKOperatorEMail:
+    Description: EMail address to notify if there are any scaling operations
+    Type: String
+    Default: osaosemwen@live.com
+    AllowedPattern: >-
+      ([a-zA-Z0-9_\-\.]+)@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.)|(([a-zA-Z0-9\-]+\.)+))([a-zA-Z]{2,4}|[0-9]{1,3})(\]?)
+    ConstraintDescription: must be a valid email address.
+
+  MKPublicSubnets:
+    Description: "Subnets to launch instances into"
+    Type: "List<AWS::EC2::Subnet::Id>"
+
+  MKProxyHostSG:
+    Description: "Select the Security Group to use for the EC2 hosts"
+    Type: "AWS::EC2::SecurityGroup::Id"
+
+  MKWEBDOMAIN:
+    Description: "A reference to the Webserver domain name"
+    Type: "String"
+
+  MKAPPLoadBalancerUrl:
+    Description: "A reference to the AppServer Load Balancer"
+    Type: "String"
+
+  MKWEBLoadBalancer:
+    Description: "A reference to the Webserver Load Balancer"
+    Type: "String"
+
+  MKIAMS3CWInstanceProfile:
+    Description: "A reference to the IamInstanceProfile"
+    Type: "String"
+
+  MKRegionAMI:
+    Description: "A reference to the Region AMI"
+    Type: "String"
+
+  MKASMIN:
+    Description: "A reference to the MinSize"
+    Type: "String"
+
+  MKASMAX:
+    Description: "A reference to the MaxSize"
+    Type: "String"
+
+  MKASDES:
+    Description: "A reference to the DesiredCapacity"
+    Type: "String"
+
+
+Resources:
+
+  # Auto Scaling Launch Configuration
+  LaunchConfiguration:
+    Type: "AWS::AutoScaling::LaunchConfiguration"
+    Properties:
+      AssociatePublicIpAddress: "true"
+      KeyName:
+        Ref: "MKKeyName"
+      ImageId:
+        Ref: "MKRegionAMI"
+      InstanceType:
+        Ref: "MKInstanceType"
+      IamInstanceProfile: S3-Admin-Access
+#        Ref: "MKIAMS3CWInstanceProfile"
+      SecurityGroups:
+      - Ref: "MKProxyHostSG"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          wget https://s3.amazonaws.com/mkdrupal-install-code/mkdrupal-install-BootStrap.sh
+          chmod +x mkdrupal-install-BootStrap.sh
+          ./mkdrupal-install-BootStrap.sh
+          /opt/aws/bin/cfn-signal -e 0 -r 'server setup complete' "${WaitHandleWEB}"  > /tmp/userdata.log
+
+  WaitHandleWEB:
+    Type: "AWS::CloudFormation::WaitConditionHandle"
+
+ # WaitCondition:
+ #   Type: "AWS::CloudFormation::WaitCondition"
+ #   Properties:
+ #     Handle: !Ref "WaitHandleWEB"
+ #     Timeout: '6000'
+
+  # Auto Scaling Group Basic Setup
+  WebScalingGroup: 
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    Properties:
+      MinSize: !Ref "MKASMIN"
+      MaxSize: !Ref "MKASMAX"
+      DesiredCapacity: !Ref "MKASDES"
+      LaunchConfigurationName:
+        Ref: "LaunchConfiguration"
+      VPCZoneIdentifier:
+        Ref: "MKPublicSubnets"
+      LoadBalancerNames:
+      - Ref: "MKWEBLoadBalancer"
+      HealthCheckGracePeriod: "300"
+      HealthCheckType: "ELB"
+      Tags:
+      - Key: "Name"
+        Value: !Sub "${MKServerEnv}-WEBserver"
+        PropagateAtLaunch: 'true'
+
+  NotificationTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      Subscription:
+        - Endpoint: !Ref MKOperatorEMail
+          Protocol: email
+
+  # Auto ScalingUp Policy - Basic Setup
+  WebServerScaleUpPolicy:
+    Type: "AWS::AutoScaling::ScalingPolicy"
+    Properties:
+      AdjustmentType: "ChangeInCapacity"
+      AutoScalingGroupName:
+        Ref: "WebScalingGroup"
+      Cooldown: '300'
+      ScalingAdjustment: '1'
+
+  # Auto ScalingDown Policy - Basic Setup
+  WebServerScaleDownPolicy:
+    Type: "AWS::AutoScaling::ScalingPolicy"
+    Properties:
+      AdjustmentType: "ChangeInCapacity"
+      AutoScalingGroupName:
+        Ref: "WebScalingGroup"
+      Cooldown: '300'
+      ScalingAdjustment: '-1'
+
+  CPUAlarmHigh:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Scale-up if CPU > 80% for 10 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '2'
+      Threshold: '80'
+      AlarmActions:
+        - !Ref WebServerScaleUpPolicy
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref WebScalingGroup
+      ComparisonOperator: GreaterThanThreshold
+
+  CPUAlarmLow:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Scale-down if CPU < 75% for 10 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '2'
+      Threshold: '75'
+      AlarmActions:
+        - !Ref WebServerScaleDownPolicy
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref WebScalingGroup
+      ComparisonOperator: LessThanThreshold
+
+Outputs:
+
+  WebScalingGroup: 
+    Description: "Auto Scaling Group Reference ID"
+    Value: !Ref "WebScalingGroup"
+
+  WebServerScaleUpPolicy: 
+    Description: "Auto Scaling Up Policy Reference ID"
+    Value: !Ref "WebServerScaleUpPolicy"
+
+  WebServerScaleDownPolicy: 
+    Description: "Auto Scaling Down Policy Reference ID"
+    Value: !Ref "WebServerScaleDownPolicy"
+
+

@@ -1,0 +1,355 @@
+# Please Note : This AWS design is built purposefully for as an architecture to host both web and mobile application of softwares in the cloud, it could be launched in various regions, depending on where your customers are located. Further design would see various architectures, linked into a master architecture. Hence, The Cloudformation Security Group IP address is open by default, for deployment purposes, this security groups (SGs) must have specific IPs.
+# To have a secured architecture, you should update Security Group Access with your own IP Address to ensure your instance and database security.
+#
+# Prerequisites
+# Before you can start this IAC, you need the following:
+# - Your AWS account must have one VPC available to be created in the selected region
+# - Amazon EC2 key pair
+# - Installed Domain, or at least an hosted Zone, but for practicallity, an installed Domain in Route 53, if your domain is not from Route53, you can still get it adapted to route53, so as to use this deployment check "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/domain-transfer-to-route-53.html".
+# - An Installed Certificate (from AWS ACM, this installed certificate is preferrably one that aligns with the Domain, for you would need its ARN for this usage, else, the deployment wont work, It has to be in your selected region & also in us-east-1. 
+#
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+    This is the master template, with the main purpose to create a Web Application Architecture, which is fault-tolerant by design.
+    The following task will be built in this template.
+    - A Custom VPC with Private and Public Subnet spread across 2 Availability Zones.
+    - An Internet Gateway, with a default route on the public subnets.
+    - NAT Gateways (In one Public AZ) and route to private subnets.
+    - AutoScaling Groups for Instances launched in 2 different subnets, each for the web and app applications
+
+###############################################################################################################
+
+Parameters: 
+
+  MKUROWNIP:
+    Default: "0.0.0.0/0"
+    Description: "Update this with your own office/home public ip address"
+    Type: "String"
+
+  MKKeyName:
+    Default: "JAH_is_Your_Helper"
+    Description: "Enter an existing EC2 KeyPair. Default is JAH_is_Your_Helper."
+    Type: "String" 
+
+  MKTemplateURL:
+    Default: "https://s3.amazonaws.com/mkcf-codefiles"
+    Description: "Enter Your S3 Cloudformation Bucket, preferrably, where the CF Architecture, the default is https://s3.amazonaws.com/mkcf-codefiles"
+    Type: "String"
+
+  MKHostedZone:
+    Default: "www.osemike.com"
+    Description: "Enter an existing Hosted Zone, this hosted Zone must be in line with arn."
+    Type: "String"
+
+  MKInstanceType: 
+    Description: "Enter your instance type. Default is t2.micro."
+    Type: "String"
+    Default: "t2.micro"
+    AllowedValues: 
+      - "t2.micro"
+      - "m1.small"
+      - "t2.medium"
+      - "t2.large"
+      - "m1.small"
+      - "m1.medium"
+      - "m1.large"
+      - "m1.xlarge"
+      - "m2.xlarge"
+      - "m2.2xlarge"
+      - "m2.4xlarge"
+      - "m3.medium"
+
+  MKOperatorEMail:
+    Description: EMail address to notify if there are any scaling operations
+    Type: String
+    Default: osaosemwen@live.com
+    AllowedPattern: >-
+      ([a-zA-Z0-9_\-\.]+)@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.)|(([a-zA-Z0-9\-]+\.)+))([a-zA-Z]{2,4}|[0-9]{1,3})(\]?)
+    ConstraintDescription: must be a valid email address.
+###############################################################################################################
+#
+# For any additional region & Env, you can add by yourself below.
+Mappings:
+  EnvMap:
+
+    dev:
+      ASMIN: '2'
+      ASMAX: '2'
+      ASDES: '2'
+      WEBDOMAIN: "www.osemike.com"
+      CDNDOMAIN: "devel.osemike.com"
+
+    test:
+      ASMIN: '2'
+      ASMAX: '2'
+      ASDES: '2'
+      WEBDOMAIN: "www.osemike.com"
+      CDNDOMAIN: "static.osemike.com"
+
+    prod:
+      ASMIN: '2'
+      ASMAX: '5'
+      ASDES: '2'
+      WEBDOMAIN: "www.osemike.com"
+      CDNDOMAIN: "cdn.osemike.com"
+
+  RegionMap:
+    us-east-1:
+      # AMI Instance - Amazon Linux AMI 2016.09.1 (HVM), SSD Volume Type - ami-dc9339bf (Free tier eligible)
+      AMI: "ami-b70554c8"
+      # AStorage - The storage class to which you want the object to transition.
+      AStorage: "GLACIER"
+      # Update with your own cert ARN HERE!
+      # Assuming you have already upload to AWS Certificate Manager
+      CertARN: "arn:aws:acm:us-east-1:562176362028:certificate/7dec9297-75db-4c99-ab6d-dba8d10b22f9"
+   
+    us-east-2:
+      AMI: "ami-40142d25"
+      AStorage: "STANDARD_IA"
+      CertARN: "arn:aws:acm:us-east-1:562176362028:certificate/7dec9297-75db-4c99-ab6d-dba8d10b22f9"
+
+    us-west-1:
+      AMI: "ami-0e86606d"
+      AStorage: "GLACIER"
+      CertARN: "arn:aws:acm:us-east-1:562176362028:certificate/7dec9297-75db-4c99-ab6d-dba8d10b22f9"
+
+    us-west-2:
+      AMI: "ami-0ad99772"
+      AStorage: "GLACIER"
+      CertARN: "arn:aws:acm:us-east-1:562176362028:certificate/7dec9297-75db-4c99-ab6d-dba8d10b22f9"
+
+    ca-central-1:
+      AMI: "ami-03e86a67"
+      AStorage: "STANDARD_IA"
+      CertARN: "arn:aws:acm:us-east-1:562176362028:certificate/7dec9297-75db-4c99-ab6d-dba8d10b22f9"
+
+    ap-northeast-1:
+      AMI: "ami-56d4ad31"
+      AStorage: "GLACIER"
+      CertARN: "arn:aws:acm:us-east-1:562176362028:certificate/7dec9297-75db-4c99-ab6d-dba8d10b22f9"
+
+    ap-southeast-1:
+      AMI: "ami-dc9339bf"
+      AStorage: "GLACIER"
+      CertARN: "arn:aws:acm:us-east-1:562176362028:certificate/7dec9297-75db-4c99-ab6d-dba8d10b22f9"
+
+    ap-southeast-2:
+      AMI: "ami-1c47407f"
+      AStorage: "STANDARD_IA"
+      CertARN: "arn:aws:acm:us-east-1:562176362028:certificate/7dec9297-75db-4c99-ab6d-dba8d10b22f9"
+
+###############################################################################################################
+
+Resources:
+
+  MyIAMRole:
+    Type: "AWS::CloudFormation::Stack"
+    Properties:
+      TemplateURL: !Sub "${MKTemplateURL}/webapp-iam.yaml"
+   #   TimeoutInMinutes: '60'
+      Parameters:
+        MKServerEnv: !Ref "AWS::StackName"
+
+  MyS3Bucket:
+    Type: "AWS::CloudFormation::Stack"
+    Properties:
+      TemplateURL: !Sub "${MKTemplateURL}/webapp-s3bucket.yaml"
+   #   TimeoutInMinutes: '60'
+      Parameters:
+        MKServerEnv: !Ref "AWS::StackName"
+        MKRegionAStorage: !FindInMap ["RegionMap", !Ref "AWS::Region", "AStorage"]
+
+  MyVPC:
+    Type: "AWS::CloudFormation::Stack"
+    Properties:
+      TemplateURL: !Sub "${MKTemplateURL}/webapp-vpc.yaml"
+  #    TimeoutInMinutes: '60'
+      Parameters:
+        MKServerEnv: !Ref "AWS::StackName"
+        MKVpcCIDR: "10.0.0.0/16"
+        MKPublicSubnet1CIDR: "10.0.1.0/24"
+        MKPublicSubnet2CIDR: "10.0.2.0/24"
+        MKPrivateSubnet1CIDR: "10.0.3.0/24"
+        MKPrivateSubnet2CIDR: "10.0.4.0/24"
+        MKFlowLogRole: !GetAtt "MyIAMRole.Outputs.VPCFlowLogRoleArn"
+
+  MySecurityGroup:
+    Type: "AWS::CloudFormation::Stack"
+    Properties:
+      TemplateURL: !Sub "${MKTemplateURL}/webapp-securitygroup.yaml"
+      TimeoutInMinutes: '60'
+      Parameters:
+        MKServerEnv: !Ref "AWS::StackName"
+        MKUROWNIP: !Ref "MKUROWNIP"
+        MKVPC: !GetAtt "MyVPC.Outputs.VPC"
+        MKNACL: !GetAtt "MyVPC.Outputs.MyNetworkACL"
+
+  MyRDS:
+    Type: "AWS::CloudFormation::Stack"
+    DependsOn:
+    - "MySecurityGroup"
+    Properties:
+      TemplateURL: !Sub "${MKTemplateURL}/webapp-rds.yaml"
+   #   TimeoutInMinutes: '80'
+      Parameters:
+        MKServerEnv: !Ref "AWS::StackName"
+        DatabaseUser: "startupadmin"
+        DatabasePassword: "0bee082a464"
+        DatabaseName: !Sub "${AWS::StackName}db"
+        DatabaseSize: '5'
+        DatabaseEngine: "mysql"
+        DatabaseInstanceClass: "db.t2.micro"
+        MKRDSSG: !GetAtt "MySecurityGroup.Outputs.RDSSG"
+        MKPrivateSubnets: !GetAtt "MyVPC.Outputs.PrivateSubnets"
+
+  
+  MyElastiCache:
+    Type: "AWS::CloudFormation::Stack"
+    DependsOn:
+    - "MySecurityGroup"
+    Properties: 
+      TemplateURL: !Sub "${MKTemplateURL}/webapp-elasticache.yaml"
+    #  TimeoutInMinutes: '5'
+      Parameters:
+       MKServerEnv: !Ref "AWS::StackName"
+       MKElastiCacheSG: !GetAtt "MySecurityGroup.Outputs.ElastiCacheSG"
+       MKPrivateSubnets: !GetAtt "MyVPC.Outputs.PrivateSubnets"
+
+
+
+
+  MyAPPELB:
+    Type: "AWS::CloudFormation::Stack"
+    Properties:
+      TemplateURL: !Sub "${MKTemplateURL}/webapp-elb-appserver.yaml"
+    #  TimeoutInMinutes: '80'
+      Parameters:
+        MKServerEnv: !Ref "AWS::StackName"
+        MKAPPELBSG: !GetAtt "MySecurityGroup.Outputs.APPELBSG"
+        MKS3Logging: !GetAtt "MyS3Bucket.Outputs.S3Logging"
+        MKPrivateSubnets: !GetAtt "MyVPC.Outputs.PrivateSubnets"
+
+  MyAPPAutoScaling:
+    Type: "AWS::CloudFormation::Stack"
+    Properties:
+      TemplateURL: !Sub "${MKTemplateURL}/webapp-autoscaling-appserver.yaml"
+   #   TimeoutInMinutes: '80'
+      Parameters:
+        MKServerEnv: !Ref "AWS::StackName"
+        MKKeyName: !Ref "MKKeyName"
+        MKInstanceType: !Ref "MKInstanceType"
+        MKRegionAMI: !FindInMap ["RegionMap", !Ref "AWS::Region", "AMI"]
+        MKAPPHostSG : !GetAtt "MySecurityGroup.Outputs.APPHostSG"
+        MKAPPLoadBalancer: !GetAtt "MyAPPELB.Outputs.APPLoadBalancer"
+        MKIAMS3CWInstanceProfile: !GetAtt "MyIAMRole.Outputs.IAMS3CWInstanceProfile"
+        MKPrivateSubnets: !GetAtt "MyVPC.Outputs.PrivateSubnets"
+        MKASMIN: !FindInMap ["EnvMap", !Ref "AWS::StackName", "ASMIN"]
+        MKASMAX: !FindInMap ["EnvMap", !Ref "AWS::StackName", "ASMAX"]
+        MKASDES: !FindInMap ["EnvMap", !Ref "AWS::StackName", "ASDES"]
+        MKWEBDOMAIN: !FindInMap ["EnvMap", !Ref "AWS::StackName", "WEBDOMAIN"]
+
+  MyWEBELB:
+    Type: "AWS::CloudFormation::Stack"
+    DependsOn:
+    - "MyAPPAutoScaling"
+    Properties:
+      TemplateURL: !Sub "${MKTemplateURL}/webapp-elb-webserver.yaml"
+   #   TimeoutInMinutes: '80'
+      Parameters:
+        MKServerEnv: !Ref "AWS::StackName"
+        MKDomain1CertARN: !FindInMap ["RegionMap", !Ref "AWS::Region", "CertARN"]
+        MKWEBELBSG: !GetAtt "MySecurityGroup.Outputs.WEBELBSG"
+        MKPublicSubnets: !GetAtt "MyVPC.Outputs.PublicSubnets"
+        MKS3Backup: !GetAtt "MyS3Bucket.Outputs.S3Backup"
+        MKS3Logging: !GetAtt "MyS3Bucket.Outputs.S3Logging"
+
+  MyWEBAutoScaling:
+    Type: "AWS::CloudFormation::Stack"
+    DependsOn:
+    - "MyWEBELB"
+    Properties:
+      TemplateURL: !Sub "${MKTemplateURL}/webapp-autoscaling-webserver.yaml"
+    #  TimeoutInMinutes: '80'
+      Parameters:
+        MKServerEnv: !Ref "AWS::StackName"
+        MKKeyName: !Ref "MKKeyName"
+        MKInstanceType: !Ref "MKInstanceType"
+        MKRegionAMI: !FindInMap ["RegionMap", !Ref "AWS::Region", "AMI"]
+        MKProxyHostSG: !GetAtt "MySecurityGroup.Outputs.ProxyHostSG"
+        MKWEBLoadBalancer: !GetAtt "MyWEBELB.Outputs.WEBLoadBalancer"
+        MKIAMS3CWInstanceProfile: !GetAtt "MyIAMRole.Outputs.IAMS3CWInstanceProfile"
+        MKPublicSubnets: !GetAtt "MyVPC.Outputs.PublicSubnets"
+        MKAPPLoadBalancerUrl: !GetAtt "MyAPPELB.Outputs.APPLoadBalancerUrl"
+        MKASMIN: !FindInMap ["EnvMap", !Ref "AWS::StackName", "ASMIN"]
+        MKASMAX: !FindInMap ["EnvMap", !Ref "AWS::StackName", "ASMAX"]
+        MKASDES: !FindInMap ["EnvMap", !Ref "AWS::StackName", "ASDES"]
+        MKWEBDOMAIN: !FindInMap ["EnvMap", !Ref "AWS::StackName", "WEBDOMAIN"]
+
+  MyCloudWatch:
+    Type: "AWS::CloudFormation::Stack"
+    DependsOn:
+    - "MyWEBAutoScaling"
+    Properties:
+      TemplateURL: !Sub "${MKTemplateURL}/webapp-cloudwatch.yaml"
+   #   TimeoutInMinutes: '80'
+      Parameters:
+        MKWebScalingGroup: !GetAtt "MyWEBAutoScaling.Outputs.WebScalingGroup"
+        MKWebServerScaleUpPolicy: !GetAtt "MyWEBAutoScaling.Outputs.WebServerScaleUpPolicy"
+        MKWebServerScaleDownPolicy: !GetAtt "MyWEBAutoScaling.Outputs.WebServerScaleDownPolicy"
+        MKAppScalingGroup: !GetAtt "MyAPPAutoScaling.Outputs.AppScalingGroup"
+        MKAPPServerScaleUpPolicy: !GetAtt "MyAPPAutoScaling.Outputs.APPServerScaleUpPolicy"
+        MKAPPServerScaleDownPolicy: !GetAtt "MyAPPAutoScaling.Outputs.APPServerScaleDownPolicy"
+
+  MyDNS:
+    Type: "AWS::CloudFormation::Stack"
+    DependsOn:
+    - "MyWEBAutoScaling"
+    Properties:
+      TemplateURL: !Sub "${MKTemplateURL}/webapp-route53.yaml"
+    #  TimeoutInMinutes: '80'
+      Parameters:
+        MKWEBLBDNSName: !GetAtt "MyWEBELB.Outputs.WEBLBDNSName"
+        MKWEBLBHostedZoneId: !GetAtt "MyWEBELB.Outputs.WEBLBHostedZoneId"
+        MKWEBDOMAIN: !FindInMap ["EnvMap", !Ref "AWS::StackName", "WEBDOMAIN"]
+        MKHostedZone: !Ref "MKHostedZone"
+
+
+Outputs:
+
+  Webserver:
+    Description: "Web Server Site"
+    Value:
+      Fn::Join:
+        - ''
+        - - "http://"
+          - !FindInMap ["EnvMap", !Ref "AWS::StackName", "WEBDOMAIN"]
+          - "/"
+
+  # Own Certs
+  # https://cloudonaut.io/pitfall-acm-certificate-cloudfront-cloudformation/
+  # Error : The specified SSL certificate doesn't exist, isn't valid, or doesn't include a valid certificate chain.
+  # But the ACM certificate needs to be created in us-east-1 when used together with CloudFront. 
+  # So one possible solution was to create the CloudFormation stack in us-east-1. Lesson learned! :)
+  MKDomain1CertARN:
+    Description: "A reference to SSL Certificate ARN of the region"
+    Value: !FindInMap ["RegionMap", "us-east-1", "CertARN"]
+    Export:
+      Name: !Sub "${AWS::StackName}CDN-MKDomain1CertARN"
+
+  MKHostedZone:
+    Description: "A reference to SSL Certificate ARN of the region"
+    Value: !Ref "MKHostedZone"
+    Export:
+      Name: !Sub "${AWS::StackName}CDN-MKHostedZone"
+
+  MKCDNDOMAIN:
+    Description: "A reference to SSL Certificate ARN of the region"
+    Value: !FindInMap ["EnvMap", !Ref "AWS::StackName", "CDNDOMAIN"]
+    Export:
+      Name: !Sub "${AWS::StackName}CDN-MKCDNDOMAIN"
+
+  MKOperatorEMail:
+    Description: EMail address to notify if there are any scaling operations
+    Value: !Ref "MKOperatorEMail"
+

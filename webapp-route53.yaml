@@ -1,0 +1,51 @@
+# Note, You need at least 1 domain and this is not free tier.
+# Pricing : https://aws.amazon.com/route53/pricing/
+#
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+    This template deploys route53 Setup,
+    Alias Web Elastic Load Balancer to <domain>
+
+Parameters: 
+
+  MKWEBDOMAIN:
+    Description: "A reference to the Webserver FQDN domain name"
+    Type: "String"
+
+  MKHostedZone:
+    Description: "A reference to the Hosted Zone"
+    Type: "String"
+
+  MKWEBLBDNSName:
+    Description: "A reference to the Webserver ELB DNS Name"
+    Type: "String"
+
+  MKWEBLBHostedZoneId:
+    Description: "A reference to the Webserver ELB Hosted Zone ID"
+    Type: "String"
+
+
+Resources:
+
+  Route53:
+    Type: "AWS::Route53::RecordSetGroup"
+    Properties:
+      HostedZoneName: !Sub "${MKHostedZone}."
+      Comment: "Zone apex alias targeted to myELB LoadBalancer."
+      RecordSets:
+      - Name: !Sub "${MKWEBDOMAIN}."
+        Type: 'A'
+        AliasTarget:
+          HostedZoneId: !Ref "MKWEBLBHostedZoneId"
+          DNSName: !Ref "MKWEBLBDNSName"
+
+
+Outputs:
+
+  WEBRoute53:
+    Description: "A reference to the Route53"
+    Value: !Ref "Route53"
+
+
+

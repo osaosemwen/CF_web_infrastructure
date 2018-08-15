@@ -1,0 +1,211 @@
+# Note, the development environment will only spin a min of 1 instance (Not HA Support)
+# The production environment will spin a min of 2 instance (HA support)
+# You can adjust the ASMIN, ASMAX, ASDES at the master.yml file
+# to meet your instances spin numbers.
+#
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+    This template deploys an AutoScaling Launch Config and Group
+
+Parameters: 
+
+  MKServerEnv:
+    Description: "Server Environment name."
+    ConstraintDescription: "Choose an Environment from the drop down"
+    Type: "String"
+    AllowedValues: 
+      - "dev"
+      - "test"
+      - "prod"
+
+  MKKeyName:
+    Description: "Enter an existing EC2 KeyPair. Default is JAH_is_Your_Helper"
+    Type: "String"
+
+  MKInstanceType: 
+    Description: "Enter t2.micro or m1.small. Default is t2.micro."
+    Type: "String"
+    AllowedValues: 
+      - "t2.micro"
+      - "m1.small"
+      - "m3.medium"
+      - "m3.large"
+      - "m3.xlarge"
+      - "m3.2xlarge"
+
+  MKOperatorEMail:
+    Description: EMail address to notify if there are any scaling operations
+    Type: String
+    Default: osaosemwen@live.com
+    AllowedPattern: >-
+      ([a-zA-Z0-9_\-\.]+)@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.)|(([a-zA-Z0-9\-]+\.)+))([a-zA-Z]{2,4}|[0-9]{1,3})(\]?)
+    ConstraintDescription: must be a valid email address.
+
+  MKPrivateSubnets:
+    Description: "Subnets to launch instances into"
+    Type: "List<AWS::EC2::Subnet::Id>"
+
+  MKAPPHostSG:
+    Description: "Select the Security Group to use for the EC2 hosts"
+    Type: "AWS::EC2::SecurityGroup::Id"
+
+  MKWEBDOMAIN:
+    Description: "A reference to the Application domain name"
+    Type: "String"
+
+  MKAPPLoadBalancer:
+    Description: "A reference to the Application Load Balancer"
+    Type: "String"
+
+  MKIAMS3CWInstanceProfile:
+    Description: "A reference to the IamInstanceProfile"
+    Type: "String"
+
+  MKRegionAMI:
+    Description: "A reference to the Region AMI"
+    Type: "String"
+
+  MKASMIN:
+    Description: "A reference to the MinSize"
+    Type: "String"
+
+  MKASMAX:
+    Description: "A reference to the MaxSize"
+    Type: "String"
+
+  MKASDES:
+    Description: "A reference to the DesiredCapacity"
+    Type: "String"
+
+
+####### Resources Setup #######
+Resources:
+
+  # Auto Scaling Launch Configuration
+  LaunchConfiguration:
+    Type: "AWS::AutoScaling::LaunchConfiguration"
+    Properties:
+      AssociatePublicIpAddress: "false"
+      KeyName:
+        Ref: "MKKeyName"
+      ImageId: 
+        Ref: "MKRegionAMI"
+      InstanceType:
+        Ref: "MKInstanceType"
+      IamInstanceProfile: S3-Admin-Access
+        #Ref: "MKIAMS3CWInstanceProfile"
+      SecurityGroups:
+      - Ref: "MKAPPHostSG"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          wget https://s3.amazonaws.com/mkdrupal-install-code/mkdrupal-install-BootStrap.sh
+          chmod +x mkdrupal-install-BootStrap.sh
+          ./mkdrupal-install-BootStrap.sh 
+          /opt/aws/bin/cfn-signal -e 0 -r 'server setup complete' "${WaitHandleAPP}"  > /tmp/userdata.log
+
+  WaitHandleAPP:
+    Type: "AWS::CloudFormation::WaitConditionHandle"
+
+ # WaitCondition:
+ #   Type: "AWS::CloudFormation::WaitCondition"
+ #   Properties:
+ #     Handle: !Ref "WaitHandleAPP"
+ #     Timeout: '60000'
+
+  # Auto Scaling Group Basic Setup
+  AppScalingGroup: 
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    Properties:
+      MinSize: !Ref "MKASMIN"
+      MaxSize: !Ref "MKASMAX"
+      DesiredCapacity: !Ref "MKASDES"
+      LaunchConfigurationName:
+        Ref: "LaunchConfiguration"
+      VPCZoneIdentifier: !Ref "MKPrivateSubnets"
+      LoadBalancerNames:
+      - Ref: "MKAPPLoadBalancer"
+      HealthCheckGracePeriod: "300"
+      HealthCheckType: "ELB"
+      Tags:
+      - Key: "Name"
+        Value: !Sub "${MKServerEnv}-APPserver"
+        PropagateAtLaunch: 'true'
+
+  NotificationTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      Subscription:
+        - Endpoint: !Ref MKOperatorEMail
+          Protocol: email
+
+  # Auto ScalingUp Policy - Basic Setup
+  APPServerScaleUpPolicy:
+    Type: "AWS::AutoScaling::ScalingPolicy"
+    Properties:
+      AdjustmentType: "ChangeInCapacity"
+      AutoScalingGroupName:
+        Ref: "AppScalingGroup"
+      Cooldown: '300'
+      ScalingAdjustment: '1'
+
+  # Auto ScalingDown Policy - Basic Setup
+  APPServerScaleDownPolicy:
+    Type: "AWS::AutoScaling::ScalingPolicy"
+    Properties:
+      AdjustmentType: "ChangeInCapacity"
+      AutoScalingGroupName:
+        Ref: "AppScalingGroup"
+      Cooldown: '300'
+      ScalingAdjustment: '-1'
+
+  CPUAlarmHigh:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Scale-up if CPU > 80% for 10 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '2'
+      Threshold: '80'
+      AlarmActions:
+        - !Ref APPServerScaleUpPolicy
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AppScalingGroup
+      ComparisonOperator: GreaterThanThreshold
+
+  CPUAlarmLow:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Scale-down if CPU < 70% for 10 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '2'
+      Threshold: '70'
+      AlarmActions:
+        - !Ref APPServerScaleDownPolicy
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AppScalingGroup
+      ComparisonOperator: LessThanThreshold      
+
+Outputs:
+
+  AppScalingGroup: 
+    Description: "Auto Scaling Group Reference ID"
+    Value: !Ref "AppScalingGroup"
+
+  APPServerScaleUpPolicy: 
+    Description: "Auto Scaling Up Policy Reference ID"
+    Value: !Ref "APPServerScaleUpPolicy"
+
+  APPServerScaleDownPolicy: 
+    Description: "Auto Scaling Down Policy Reference ID"
+    Value: !Ref "APPServerScaleDownPolicy"
+
+ 
